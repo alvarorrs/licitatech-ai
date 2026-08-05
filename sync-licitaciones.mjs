@@ -1,19 +1,15 @@
 // ============================================================
-// LicitaTech AI — Sync de licitaciones PLACSP → Supabase
-// Ejecutado por GitHub Actions cada 12h. 100% gratis, sin IA.
-//
-// Fuente oficial: feed ATOM/CODICE de licitaciones en perfiles
-// del contratante (excluye contratos menores).
-// https://www.hacienda.gob.es/.../LicitacionesContratante.aspx
+// LicitaTech AI — Sync PLACSP → Supabase (v2 mejorado)
+// SIN filtro previo destructivo — captura TODO
 // ============================================================
 
 import { createClient } from '@supabase/supabase-js';
 import { XMLParser } from 'fast-xml-parser';
-import { calcularScore, pasaFiltroPrevio } from './rule-scoring.mjs';
+import { calcularScore } from './rule-scoring.mjs';
 
 const FEED_URL = 'https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom';
 const SYNC_ID = 'placsp_perfiles_contratante';
-const MAX_PAGINAS_POR_EJECUCION = 20; // límite de seguridad por ejecución (500 entradas/página)
+const MAX_PAGINAS = 50; // aumentado: capturar más páginas
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -23,22 +19,17 @@ const supabase = createClient(
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
-  removeNSPrefix: true, // simplifica namespaces CODICE/UBL para no pelear con prefijos
+  removeNSPrefix: true,
 });
 
 async function fetchAtom(url) {
   const res = await fetch(url, {
     headers: { 'User-Agent': 'LicitaTechAI/1.0 (contacto: nltech.es)' },
   });
-  if (!res.ok) throw new Error(`Error al descargar feed: ${res.status} ${res.statusText} (${url})`);
-  const xml = await res.text();
-  return xmlParser.parse(xml);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return xmlParser.parse(await res.text());
 }
 
-/**
- * Extrae el/los CPV de una entrada CODICE. La estructura real puede variar
- * ligeramente; se buscan varias rutas conocidas y se cae a raw si no se encuentra.
- */
 function extraerCPV(contractFolder) {
   const codes = [];
   const classif = contractFolder?.ProcurementProject?.RequiredCommodityClassification;
@@ -47,7 +38,7 @@ function extraerCPV(contractFolder) {
     const code = c?.ItemClassificationCode?.['#text'] ?? c?.ItemClassificationCode;
     if (code) codes.push(String(code));
   }
-  return codes;
+  return codes.length > 0 ? codes : ['92000000']; // fallback a ocio/cultura si no hay CPV
 }
 
 function extraerImporte(contractFolder) {
@@ -57,31 +48,26 @@ function extraerImporte(contractFolder) {
   return val ? Number(val) : null;
 }
 
-/**
- * Normaliza una <entry> del atom a nuestro esquema de `licitaciones`.
- * Guarda SIEMPRE el objeto original completo en raw_codice — así no se
- * pierde nada aunque un campo no esté bien mapeado.
- */
 function normalizarEntry(entry) {
   const cf = entry?.ContractFolderStatus ?? {};
   const idExpediente = cf?.ContractFolderID ?? entry?.id;
   const party = cf?.LocatedContractingParty?.Party;
-  const organismo = party?.PartyName?.Name ?? party?.PartyLegalEntity?.RegistrationName ?? null;
+  const organismo = party?.PartyName?.Name ?? party?.PartyLegalEntity?.RegistrationName ?? 'Sin nombre';
   const location = cf?.ProcurementProject?.RealizedLocation?.CountrySubentity ?? null;
 
   return {
     id_expediente: String(idExpediente ?? entry?.id ?? crypto.randomUUID()),
-    titulo: entry?.title ?? cf?.ProcurementProject?.Name ?? null,
-    objeto: cf?.ProcurementProject?.Name ?? null,
-    descripcion: cf?.ProcurementProject?.Description ?? null,
+    titulo: entry?.title ?? cf?.ProcurementProject?.Name ?? 'Licitación sin título',
+    objeto: cf?.ProcurementProject?.Name ?? entry?.title ?? '',
+    descripcion: cf?.ProcurementProject?.Description ?? '',
     organismo,
-    organo_contratacion: party?.PartyName?.Name ?? null,
-    comunidad_autonoma: location ?? null,
-    provincia: null, // se puede refinar con un mapeo CountrySubentityCode -> provincia
+    organo_contratacion: party?.PartyName?.Name ?? '',
+    comunidad_autonoma: location ?? 'No especificada',
+    provincia: null,
     municipio: null,
     fecha_publicacion: entry?.updated ? entry.updated.slice(0, 10) : null,
     fecha_limite: cf?.TenderingProcess?.TenderSubmissionDeadlinePeriod?.EndDate ?? null,
-    estado: cf?.ContractFolderStatusCode?.['#text'] ?? cf?.ContractFolderStatusCode ?? null,
+    estado: cf?.ContractFolderStatusCode?.['#text'] ?? cf?.ContractFolderStatusCode ?? 'PUB',
     tipo_contrato: cf?.ProcurementProject?.TypeCode?.['#text'] ?? cf?.ProcurementProject?.TypeCode ?? null,
     procedimiento: cf?.TenderingProcess?.ProcedureCode?.['#text'] ?? null,
     tipo_tramitacion: cf?.TenderingProcess?.UrgencyCode?.['#text'] ?? null,
@@ -110,19 +96,18 @@ async function obtenerCursor() {
   return data?.cursor_url || FEED_URL;
 }
 
-async function guardarCursor({ cursorUrl, nuevas, duplicadas, errores }) {
+async function guardarCursor(cursorUrl, nuevas, actualizadas, errores) {
   await supabase.from('sync_state').upsert({
     id: SYNC_ID,
     cursor_url: cursorUrl,
     ultima_ejecucion: new Date().toISOString(),
     nuevas,
-    duplicadas,
+    duplicadas: actualizadas,
     errores,
   });
 }
 
 async function upsertLicitacion(lic, score) {
-  // Mira si ya existe, para conservar histórico si cambia de estado
   const { data: existente } = await supabase
     .from('licitaciones')
     .select('id, estado, historico')
@@ -146,19 +131,18 @@ async function upsertLicitacion(lic, score) {
 }
 
 async function main() {
-  console.log('🔄 LicitaTech AI — Iniciando sincronización...');
+  console.log('🔄 LicitaTech AI — Sincronización iniciada (SIN filtro destructivo)');
   const { cpv: cpvBiblioteca, keywords: keywordsBiblioteca } = await cargarBibliotecas();
 
   if (!cpvBiblioteca.length) {
-    console.warn('⚠️  cpv_biblioteca está vacía — ejecuta sql/schema.sql en Supabase primero.');
+    console.warn('⚠️ cpv_biblioteca vacía — ejecuta schema.sql primero');
   }
 
   let url = await obtenerCursor();
-  let nuevas = 0, duplicadas = 0, errores = 0, descartadasPorFiltro = 0;
-  let paginas = 0;
+  let nuevas = 0, actualizadas = 0, errores = 0, paginas = 0;
 
-  while (url && paginas < MAX_PAGINAS_POR_EJECUCION) {
-    console.log(`📄 Descargando página ${paginas + 1}: ${url}`);
+  while (url && paginas < MAX_PAGINAS) {
+    console.log(`📄 Página ${paginas + 1}: descargando...`);
     let feed;
     try {
       feed = await fetchAtom(url);
@@ -171,40 +155,45 @@ async function main() {
     const root = feed?.feed ?? feed;
     const entries = Array.isArray(root?.entry) ? root.entry : [root?.entry].filter(Boolean);
 
+    console.log(`   → ${entries.length} entradas encontradas`);
+
     for (const entry of entries) {
       try {
-        // <at:deleted-entry> indica que la licitación se retiró — se podría marcar como archivada
         if (entry?.['deleted-entry']) continue;
 
         const lic = normalizarEntry(entry);
-        if (!pasaFiltroPrevio(lic, cpvBiblioteca)) {
-          descartadasPorFiltro++;
-          continue;
-        }
-
+        
+        // ✅ CAMBIO CRÍTICO: Calcular score SIEMPRE, guardar TODO
         const score = calcularScore(lic, cpvBiblioteca, keywordsBiblioteca);
         const { esNueva } = await upsertLicitacion(lic, score);
-        esNueva ? nuevas++ : duplicadas++;
+        
+        if (esNueva) nuevas++;
+        else actualizadas++;
       } catch (e) {
         console.error('❌ Error procesando entrada:', e.message);
         errores++;
       }
     }
 
-    // Paginación: PLACSP encadena páginas via <link rel="next">
     const links = Array.isArray(root?.link) ? root.link : [root?.link].filter(Boolean);
     const next = links.find(l => l?.['@_rel'] === 'next')?.['@_href'];
     url = next || null;
     paginas++;
+
+    if (paginas % 5 === 0) console.log(`   ✓ ${paginas} páginas procesadas, ${nuevas + actualizadas} licitaciones guardadas`);
   }
 
-  await guardarCursor({ cursorUrl: url ?? FEED_URL, nuevas, duplicadas, errores });
+  await guardarCursor(url ?? FEED_URL, nuevas, actualizadas, errores);
 
-  console.log('✅ Sincronización completada:');
-  console.log(`   Nuevas: ${nuevas} | Actualizadas: ${duplicadas} | Descartadas por filtro: ${descartadasPorFiltro} | Errores: ${errores}`);
+  console.log('\n✅ SINCRONIZACIÓN COMPLETADA:');
+  console.log(`   Nuevas: ${nuevas}`);
+  console.log(`   Actualizadas: ${actualizadas}`);
+  console.log(`   Errores: ${errores}`);
+  console.log(`   Total: ${nuevas + actualizadas}`);
+  console.log(`   Páginas procesadas: ${paginas}`);
 }
 
 main().catch(e => {
-  console.error('💥 Fallo general del script:', e);
+  console.error('💥 Error fatal:', e);
   process.exit(1);
 });
