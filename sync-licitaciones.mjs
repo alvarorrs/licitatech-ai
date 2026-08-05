@@ -1,15 +1,35 @@
 // ============================================================
-// LicitaTech AI — Sync PLACSP → Supabase (v2 mejorado)
-// SIN filtro previo destructivo — captura TODO
+// LicitaTech AI — Sync PLACSP → Supabase (v3)
+// Novedades:
+//  - Multi-canal: licitaciones "grandes" + contratos menores
+//  - Usa rule-scoring v3 (normalización de tildes/mayúsculas)
+//  - Sin filtro destructivo: guarda TODO
 // ============================================================
 
 import { createClient } from '@supabase/supabase-js';
 import { XMLParser } from 'fast-xml-parser';
 import { calcularScore } from './rule-scoring.mjs';
 
-const FEED_URL = 'https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom';
-const SYNC_ID = 'placsp_perfiles_contratante';
-const MAX_PAGINAS = 50; // aumentado: capturar más páginas
+// ---------- Canales oficiales PLACSP ----------
+// Nota: la URL de contratos menores se ha construido siguiendo el mismo
+// patrón documentado que el canal principal (sindicación 1143, confirmada
+// en la web oficial de datos abiertos de Hacienda). Si en la primera
+// ejecución diera 404, hay que revisar el nombre exacto del .atom base
+// en https://www.hacienda.gob.es/.../ContratosMenores.aspx
+const CANALES = [
+  {
+    id: 'placsp_perfiles_contratante',
+    nombre: 'Licitaciones (perfiles del contratante)',
+    url: 'https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom',
+  },
+  {
+    id: 'placsp_contratos_menores',
+    nombre: 'Contratos menores',
+    url: 'https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_1143/contratosMenoresPerfilesContratantes.atom',
+  },
+];
+
+const MAX_PAGINAS_POR_CANAL = 50;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -26,7 +46,7 @@ async function fetchAtom(url) {
   const res = await fetch(url, {
     headers: { 'User-Agent': 'LicitaTechAI/1.0 (contacto: nltech.es)' },
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} (${url})`);
   return xmlParser.parse(await res.text());
 }
 
@@ -38,7 +58,7 @@ function extraerCPV(contractFolder) {
     const code = c?.ItemClassificationCode?.['#text'] ?? c?.ItemClassificationCode;
     if (code) codes.push(String(code));
   }
-  return codes.length > 0 ? codes : ['92000000']; // fallback a ocio/cultura si no hay CPV
+  return codes.length > 0 ? codes : ['92000000'];
 }
 
 function extraerImporte(contractFolder) {
@@ -48,7 +68,7 @@ function extraerImporte(contractFolder) {
   return val ? Number(val) : null;
 }
 
-function normalizarEntry(entry) {
+function normalizarEntry(entry, canalId) {
   const cf = entry?.ContractFolderStatus ?? {};
   const idExpediente = cf?.ContractFolderID ?? entry?.id;
   const party = cf?.LocatedContractingParty?.Party;
@@ -56,7 +76,8 @@ function normalizarEntry(entry) {
   const location = cf?.ProcurementProject?.RealizedLocation?.CountrySubentity ?? null;
 
   return {
-    id_expediente: String(idExpediente ?? entry?.id ?? crypto.randomUUID()),
+    // Prefijo por canal para evitar colisión de IDs entre canales
+    id_expediente: `${canalId}:${idExpediente ?? entry?.id ?? crypto.randomUUID()}`,
     titulo: entry?.title ?? cf?.ProcurementProject?.Name ?? 'Licitación sin título',
     objeto: cf?.ProcurementProject?.Name ?? entry?.title ?? '',
     descripcion: cf?.ProcurementProject?.Description ?? '',
@@ -69,7 +90,7 @@ function normalizarEntry(entry) {
     fecha_limite: cf?.TenderingProcess?.TenderSubmissionDeadlinePeriod?.EndDate ?? null,
     estado: cf?.ContractFolderStatusCode?.['#text'] ?? cf?.ContractFolderStatusCode ?? 'PUB',
     tipo_contrato: cf?.ProcurementProject?.TypeCode?.['#text'] ?? cf?.ProcurementProject?.TypeCode ?? null,
-    procedimiento: cf?.TenderingProcess?.ProcedureCode?.['#text'] ?? null,
+    procedimiento: cf?.TenderingProcess?.ProcedureCode?.['#text'] ?? (canalId.includes('menor') ? 'Contrato menor' : null),
     tipo_tramitacion: cf?.TenderingProcess?.UrgencyCode?.['#text'] ?? null,
     valor_estimado: extraerImporte(cf),
     presupuesto: extraerImporte(cf),
@@ -91,14 +112,14 @@ async function cargarBibliotecas() {
   return { cpv: cpv ?? [], keywords: keywords ?? [] };
 }
 
-async function obtenerCursor() {
-  const { data } = await supabase.from('sync_state').select('*').eq('id', SYNC_ID).maybeSingle();
-  return data?.cursor_url || FEED_URL;
+async function obtenerCursor(canalId, urlDefault) {
+  const { data } = await supabase.from('sync_state').select('*').eq('id', canalId).maybeSingle();
+  return data?.cursor_url || urlDefault;
 }
 
-async function guardarCursor(cursorUrl, nuevas, actualizadas, errores) {
+async function guardarCursor(canalId, cursorUrl, nuevas, actualizadas, errores) {
   await supabase.from('sync_state').upsert({
-    id: SYNC_ID,
+    id: canalId,
     cursor_url: cursorUrl,
     ultima_ejecucion: new Date().toISOString(),
     nuevas,
@@ -130,24 +151,17 @@ async function upsertLicitacion(lic, score) {
   return { esNueva: !existente };
 }
 
-async function main() {
-  console.log('🔄 LicitaTech AI — Sincronización iniciada (SIN filtro destructivo)');
-  const { cpv: cpvBiblioteca, keywords: keywordsBiblioteca } = await cargarBibliotecas();
-
-  if (!cpvBiblioteca.length) {
-    console.warn('⚠️ cpv_biblioteca vacía — ejecuta schema.sql primero');
-  }
-
-  let url = await obtenerCursor();
+async function sincronizarCanal(canal, cpvBiblioteca, keywordsBiblioteca) {
+  console.log(`\n📡 Canal: ${canal.nombre}`);
+  let url = await obtenerCursor(canal.id, canal.url);
   let nuevas = 0, actualizadas = 0, errores = 0, paginas = 0;
 
-  while (url && paginas < MAX_PAGINAS) {
-    console.log(`📄 Página ${paginas + 1}: descargando...`);
+  while (url && paginas < MAX_PAGINAS_POR_CANAL) {
     let feed;
     try {
       feed = await fetchAtom(url);
     } catch (e) {
-      console.error('❌ Error descargando feed:', e.message);
+      console.error(`   ❌ Error descargando (${canal.nombre}):`, e.message);
       errores++;
       break;
     }
@@ -155,22 +169,15 @@ async function main() {
     const root = feed?.feed ?? feed;
     const entries = Array.isArray(root?.entry) ? root.entry : [root?.entry].filter(Boolean);
 
-    console.log(`   → ${entries.length} entradas encontradas`);
-
     for (const entry of entries) {
       try {
         if (entry?.['deleted-entry']) continue;
-
-        const lic = normalizarEntry(entry);
-        
-        // ✅ CAMBIO CRÍTICO: Calcular score SIEMPRE, guardar TODO
+        const lic = normalizarEntry(entry, canal.id);
         const score = calcularScore(lic, cpvBiblioteca, keywordsBiblioteca);
         const { esNueva } = await upsertLicitacion(lic, score);
-        
-        if (esNueva) nuevas++;
-        else actualizadas++;
+        esNueva ? nuevas++ : actualizadas++;
       } catch (e) {
-        console.error('❌ Error procesando entrada:', e.message);
+        console.error('   ❌ Error procesando entrada:', e.message);
         errores++;
       }
     }
@@ -180,17 +187,38 @@ async function main() {
     url = next || null;
     paginas++;
 
-    if (paginas % 5 === 0) console.log(`   ✓ ${paginas} páginas procesadas, ${nuevas + actualizadas} licitaciones guardadas`);
+    if (paginas % 10 === 0) console.log(`   ✓ ${paginas} páginas · ${nuevas + actualizadas} guardadas`);
   }
 
-  await guardarCursor(url ?? FEED_URL, nuevas, actualizadas, errores);
+  await guardarCursor(canal.id, url ?? canal.url, nuevas, actualizadas, errores);
+  console.log(`   ✅ ${canal.nombre}: ${nuevas} nuevas, ${actualizadas} actualizadas, ${errores} errores (${paginas} páginas)`);
+  return { nuevas, actualizadas, errores };
+}
 
-  console.log('\n✅ SINCRONIZACIÓN COMPLETADA:');
-  console.log(`   Nuevas: ${nuevas}`);
-  console.log(`   Actualizadas: ${actualizadas}`);
-  console.log(`   Errores: ${errores}`);
-  console.log(`   Total: ${nuevas + actualizadas}`);
-  console.log(`   Páginas procesadas: ${paginas}`);
+async function main() {
+  console.log('🔄 LicitaTech AI v3 — Sincronización multi-canal iniciada');
+  const { cpv: cpvBiblioteca, keywords: keywordsBiblioteca } = await cargarBibliotecas();
+
+  if (!cpvBiblioteca.length) console.warn('⚠️ cpv_biblioteca vacía');
+  if (!keywordsBiblioteca.length) console.warn('⚠️ keywords_biblioteca vacía');
+
+  let totalNuevas = 0, totalActualizadas = 0, totalErrores = 0;
+
+  for (const canal of CANALES) {
+    try {
+      const r = await sincronizarCanal(canal, cpvBiblioteca, keywordsBiblioteca);
+      totalNuevas += r.nuevas;
+      totalActualizadas += r.actualizadas;
+      totalErrores += r.errores;
+    } catch (e) {
+      // Si un canal falla completo (ej. URL 404), no bloquea el resto
+      console.error(`💥 Canal "${canal.nombre}" falló completamente:`, e.message);
+      totalErrores++;
+    }
+  }
+
+  console.log('\n✅ SINCRONIZACIÓN COMPLETADA (todos los canales):');
+  console.log(`   Nuevas: ${totalNuevas} | Actualizadas: ${totalActualizadas} | Errores: ${totalErrores}`);
 }
 
 main().catch(e => {
