@@ -4,7 +4,7 @@
   "description": "Sincronización de licitaciones PLACSP -> Supabase, 100% gratis, sin IA",
   "type": "module",
   "scripts": {
-    "sync": "node scripts/sync-licitaciones.mjs"
+    "sync": "node sync-licitaciones.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
