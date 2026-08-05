@@ -1,21 +1,18 @@
 // ============================================================
-// LicitaTech AI — Sync PLACSP → Supabase (v3)
-// Novedades:
-//  - Multi-canal: licitaciones "grandes" + contratos menores
-//  - Usa rule-scoring v3 (normalización de tildes/mayúsculas)
-//  - Sin filtro destructivo: guarda TODO
+// LicitaTech AI — Sync PLACSP → Supabase (v4, optimizado)
+//
+// Cambios frente a v3 (que agotaba los 30 min de GitHub Actions):
+//  1. Consultas por LOTES: 1 SELECT por página en vez de 1 por licitación
+//  2. UPSERT por LOTES de 500 en vez de uno a uno
+//  3. Cursor guardado DESPUÉS DE CADA PÁGINA — si el job se corta,
+//     la siguiente ejecución continúa donde se quedó (antes se perdía todo)
+//  4. Presupuesto de tiempo: para limpiamente antes del límite del runner
 // ============================================================
 
 import { createClient } from '@supabase/supabase-js';
 import { XMLParser } from 'fast-xml-parser';
 import { calcularScore } from './rule-scoring.mjs';
 
-// ---------- Canales oficiales PLACSP ----------
-// Nota: la URL de contratos menores se ha construido siguiendo el mismo
-// patrón documentado que el canal principal (sindicación 1143, confirmada
-// en la web oficial de datos abiertos de Hacienda). Si en la primera
-// ejecución diera 404, hay que revisar el nombre exacto del .atom base
-// en https://www.hacienda.gob.es/.../ContratosMenores.aspx
 const CANALES = [
   {
     id: 'placsp_perfiles_contratante',
@@ -29,61 +26,52 @@ const CANALES = [
   },
 ];
 
-const MAX_PAGINAS_POR_CANAL = 50;
+const MAX_PAGINAS_POR_CANAL = 200;          // ya no es el cuello de botella
+const LOTE_UPSERT = 500;                    // filas por escritura
+const PRESUPUESTO_MS = 22 * 60 * 1000;      // 22 min: deja margen antes del timeout
+const INICIO = Date.now();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', removeNSPrefix: true });
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  removeNSPrefix: true,
-});
+const tiempoAgotado = () => (Date.now() - INICIO) > PRESUPUESTO_MS;
 
 async function fetchAtom(url) {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'LicitaTechAI/1.0 (contacto: nltech.es)' },
-  });
+  const res = await fetch(url, { headers: { 'User-Agent': 'LicitaTechAI/1.0 (contacto: nltech.es)' } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} (${url})`);
   return xmlParser.parse(await res.text());
 }
 
-function extraerCPV(contractFolder) {
+function extraerCPV(cf) {
   const codes = [];
-  const classif = contractFolder?.ProcurementProject?.RequiredCommodityClassification;
+  const classif = cf?.ProcurementProject?.RequiredCommodityClassification;
   const arr = Array.isArray(classif) ? classif : [classif].filter(Boolean);
   for (const c of arr) {
     const code = c?.ItemClassificationCode?.['#text'] ?? c?.ItemClassificationCode;
     if (code) codes.push(String(code));
   }
-  return codes.length > 0 ? codes : ['92000000'];
+  return codes.length ? codes : ['92000000'];
 }
 
-function extraerImporte(contractFolder) {
-  const budget = contractFolder?.ProcurementProject?.BudgetAmount;
-  const val = budget?.EstimatedOverallContractAmount?.['#text'] ?? budget?.EstimatedOverallContractAmount
-    ?? budget?.TotalAmount?.['#text'] ?? budget?.TotalAmount;
-  return val ? Number(val) : null;
+function extraerImporte(cf) {
+  const b = cf?.ProcurementProject?.BudgetAmount;
+  const v = b?.EstimatedOverallContractAmount?.['#text'] ?? b?.EstimatedOverallContractAmount
+    ?? b?.TotalAmount?.['#text'] ?? b?.TotalAmount;
+  return v ? Number(v) : null;
 }
 
 function normalizarEntry(entry, canalId) {
   const cf = entry?.ContractFolderStatus ?? {};
   const idExpediente = cf?.ContractFolderID ?? entry?.id;
   const party = cf?.LocatedContractingParty?.Party;
-  const organismo = party?.PartyName?.Name ?? party?.PartyLegalEntity?.RegistrationName ?? 'Sin nombre';
-  const location = cf?.ProcurementProject?.RealizedLocation?.CountrySubentity ?? null;
-
   return {
-    // Prefijo por canal para evitar colisión de IDs entre canales
     id_expediente: `${canalId}:${idExpediente ?? entry?.id ?? crypto.randomUUID()}`,
     titulo: entry?.title ?? cf?.ProcurementProject?.Name ?? 'Licitación sin título',
     objeto: cf?.ProcurementProject?.Name ?? entry?.title ?? '',
     descripcion: cf?.ProcurementProject?.Description ?? '',
-    organismo,
+    organismo: party?.PartyName?.Name ?? party?.PartyLegalEntity?.RegistrationName ?? 'Sin nombre',
     organo_contratacion: party?.PartyName?.Name ?? '',
-    comunidad_autonoma: location ?? 'No especificada',
+    comunidad_autonoma: cf?.ProcurementProject?.RealizedLocation?.CountrySubentity ?? 'No especificada',
     provincia: null,
     municipio: null,
     fecha_publicacion: entry?.updated ? entry.updated.slice(0, 10) : null,
@@ -122,33 +110,48 @@ async function guardarCursor(canalId, cursorUrl, nuevas, actualizadas, errores) 
     id: canalId,
     cursor_url: cursorUrl,
     ultima_ejecucion: new Date().toISOString(),
-    nuevas,
-    duplicadas: actualizadas,
-    errores,
+    nuevas, duplicadas: actualizadas, errores,
   });
 }
 
-async function upsertLicitacion(lic, score) {
-  const { data: existente } = await supabase
-    .from('licitaciones')
-    .select('id, estado, historico')
-    .eq('id_expediente', lic.id_expediente)
-    .maybeSingle();
+/**
+ * Procesa una página completa con solo 1 SELECT + N/500 UPSERTs,
+ * en vez de 2 consultas por licitación (que es lo que reventaba el tiempo).
+ */
+async function procesarLote(licitaciones, cpvBiblioteca, keywordsBiblioteca) {
+  if (!licitaciones.length) return { nuevas: 0, actualizadas: 0 };
 
-  const historico = existente?.historico ?? [];
-  if (existente && existente.estado !== lic.estado) {
-    historico.push({ estado: existente.estado, fecha: new Date().toISOString() });
+  const ids = licitaciones.map(l => l.id_expediente);
+
+  // 1 sola consulta para saber cuáles ya existen y con qué estado
+  const { data: existentes, error: errSelect } = await supabase
+    .from('licitaciones')
+    .select('id_expediente, estado, historico')
+    .in('id_expediente', ids);
+
+  if (errSelect) throw errSelect;
+
+  const mapaExistentes = new Map((existentes || []).map(e => [e.id_expediente, e]));
+
+  const filas = licitaciones.map(lic => {
+    const score = calcularScore(lic, cpvBiblioteca, keywordsBiblioteca);
+    const previo = mapaExistentes.get(lic.id_expediente);
+    const historico = previo?.historico ?? [];
+    if (previo && previo.estado !== lic.estado) {
+      historico.push({ estado: previo.estado, fecha: new Date().toISOString() });
+    }
+    return { ...lic, ...score, historico, updated_at: new Date().toISOString() };
+  });
+
+  // Escritura por lotes
+  for (let i = 0; i < filas.length; i += LOTE_UPSERT) {
+    const chunk = filas.slice(i, i + LOTE_UPSERT);
+    const { error } = await supabase.from('licitaciones').upsert(chunk, { onConflict: 'id_expediente' });
+    if (error) throw error;
   }
 
-  const { error } = await supabase.from('licitaciones').upsert({
-    ...lic,
-    ...score,
-    historico,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'id_expediente' });
-
-  if (error) throw error;
-  return { esNueva: !existente };
+  const nuevas = licitaciones.filter(l => !mapaExistentes.has(l.id_expediente)).length;
+  return { nuevas, actualizadas: licitaciones.length - nuevas };
 }
 
 async function sincronizarCanal(canal, cpvBiblioteca, keywordsBiblioteca) {
@@ -157,29 +160,33 @@ async function sincronizarCanal(canal, cpvBiblioteca, keywordsBiblioteca) {
   let nuevas = 0, actualizadas = 0, errores = 0, paginas = 0;
 
   while (url && paginas < MAX_PAGINAS_POR_CANAL) {
+    if (tiempoAgotado()) {
+      console.log(`   ⏱️ Presupuesto de tiempo agotado — se guarda el cursor y continúa en la próxima ejecución`);
+      break;
+    }
+
     let feed;
     try {
       feed = await fetchAtom(url);
     } catch (e) {
-      console.error(`   ❌ Error descargando (${canal.nombre}):`, e.message);
+      console.error(`   ❌ Error descargando:`, e.message);
       errores++;
       break;
     }
 
     const root = feed?.feed ?? feed;
     const entries = Array.isArray(root?.entry) ? root.entry : [root?.entry].filter(Boolean);
+    const licitaciones = entries
+      .filter(e => !e?.['deleted-entry'])
+      .map(e => normalizarEntry(e, canal.id));
 
-    for (const entry of entries) {
-      try {
-        if (entry?.['deleted-entry']) continue;
-        const lic = normalizarEntry(entry, canal.id);
-        const score = calcularScore(lic, cpvBiblioteca, keywordsBiblioteca);
-        const { esNueva } = await upsertLicitacion(lic, score);
-        esNueva ? nuevas++ : actualizadas++;
-      } catch (e) {
-        console.error('   ❌ Error procesando entrada:', e.message);
-        errores++;
-      }
+    try {
+      const r = await procesarLote(licitaciones, cpvBiblioteca, keywordsBiblioteca);
+      nuevas += r.nuevas;
+      actualizadas += r.actualizadas;
+    } catch (e) {
+      console.error('   ❌ Error guardando lote:', e.message);
+      errores++;
     }
 
     const links = Array.isArray(root?.link) ? root.link : [root?.link].filter(Boolean);
@@ -187,41 +194,40 @@ async function sincronizarCanal(canal, cpvBiblioteca, keywordsBiblioteca) {
     url = next || null;
     paginas++;
 
-    if (paginas % 10 === 0) console.log(`   ✓ ${paginas} páginas · ${nuevas + actualizadas} guardadas`);
+    // CLAVE: guardar el cursor tras cada página. Si el runner corta el job,
+    // no se pierde el progreso ni se vuelve a empezar desde el principio.
+    await guardarCursor(canal.id, url ?? canal.url, nuevas, actualizadas, errores);
+
+    if (paginas % 10 === 0) {
+      const min = ((Date.now() - INICIO) / 60000).toFixed(1);
+      console.log(`   ✓ ${paginas} páginas · ${nuevas + actualizadas} procesadas · ${min} min`);
+    }
   }
 
-  await guardarCursor(canal.id, url ?? canal.url, nuevas, actualizadas, errores);
   console.log(`   ✅ ${canal.nombre}: ${nuevas} nuevas, ${actualizadas} actualizadas, ${errores} errores (${paginas} páginas)`);
   return { nuevas, actualizadas, errores };
 }
 
 async function main() {
-  console.log('🔄 LicitaTech AI v3 — Sincronización multi-canal iniciada');
+  console.log('🔄 LicitaTech AI v4 — Sincronización por lotes');
   const { cpv: cpvBiblioteca, keywords: keywordsBiblioteca } = await cargarBibliotecas();
-
   if (!cpvBiblioteca.length) console.warn('⚠️ cpv_biblioteca vacía');
   if (!keywordsBiblioteca.length) console.warn('⚠️ keywords_biblioteca vacía');
 
-  let totalNuevas = 0, totalActualizadas = 0, totalErrores = 0;
-
+  let tN = 0, tA = 0, tE = 0;
   for (const canal of CANALES) {
+    if (tiempoAgotado()) { console.log(`⏭️ Sin tiempo para el canal "${canal.nombre}" — irá en la próxima ejecución`); continue; }
     try {
       const r = await sincronizarCanal(canal, cpvBiblioteca, keywordsBiblioteca);
-      totalNuevas += r.nuevas;
-      totalActualizadas += r.actualizadas;
-      totalErrores += r.errores;
+      tN += r.nuevas; tA += r.actualizadas; tE += r.errores;
     } catch (e) {
-      // Si un canal falla completo (ej. URL 404), no bloquea el resto
-      console.error(`💥 Canal "${canal.nombre}" falló completamente:`, e.message);
-      totalErrores++;
+      console.error(`💥 Canal "${canal.nombre}" falló:`, e.message);
+      tE++;
     }
   }
 
-  console.log('\n✅ SINCRONIZACIÓN COMPLETADA (todos los canales):');
-  console.log(`   Nuevas: ${totalNuevas} | Actualizadas: ${totalActualizadas} | Errores: ${totalErrores}`);
+  const min = ((Date.now() - INICIO) / 60000).toFixed(1);
+  console.log(`\n✅ COMPLETADO en ${min} min — Nuevas: ${tN} | Actualizadas: ${tA} | Errores: ${tE}`);
 }
 
-main().catch(e => {
-  console.error('💥 Error fatal:', e);
-  process.exit(1);
-});
+main().catch(e => { console.error('💥 Error fatal:', e); process.exit(1); });
