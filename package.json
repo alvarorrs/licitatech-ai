@@ -1,0 +1,16 @@
+{
+  "name": "licitatech-ai-sync",
+  "version": "1.0.0",
+  "description": "Sincronización de licitaciones PLACSP -> Supabase, 100% gratis, sin IA",
+  "type": "module",
+  "scripts": {
+    "sync": "node scripts/sync-licitaciones.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "fast-xml-parser": "^4.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

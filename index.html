@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>LicitaTech AI — Radar de licitaciones</title>
+<meta name="description" content="Licitaciones públicas de España relacionadas con gaming, esports, tecnología y eventos, detectadas automáticamente desde la Plataforma de Contratación del Sector Público.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+/* ============ DESIGN TOKENS — LicitaTech AI ============ */
+:root{
+  --bg:#07090F; --panel:#0D111C; --panel-2:#111726; --line:#1C2334;
+  --ink:#EDEFF3; --ink-soft:#9098AC; --ink-faint:#565F76;
+  --lime:#E4F300; --lime-dim:#8B9200;
+  --amber:#F5A623; --teal:#4FD1C5; --grey-sig:#3A4257;
+  --r-lg:20px; --r:14px; --r-sm:9px;
+  --mono:'JetBrains Mono',monospace;
+}
+*{box-sizing:border-box;}
+::selection{background:var(--lime); color:#07090F;}
+html,body{margin:0; min-height:100%;}
+body{
+  font-family:'Hanken Grotesk',system-ui,sans-serif; background:var(--bg); color:var(--ink);
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,.disp{font-family:'Rajdhani',sans-serif; letter-spacing:.01em; margin:0; font-weight:700;}
+.mono{font-family:var(--mono);}
+button,input,select{font-family:inherit;}
+
+/* ============ SHELL ============ */
+.wrap{max-width:760px; margin:0 auto; padding:0 16px 60px;}
+
+/* Header con "escaneo de radar" */
+.topbar{
+  display:flex; align-items:center; gap:12px; padding:22px 16px 18px; max-width:760px; margin:0 auto;
+  border-bottom:1px solid var(--line);
+}
+.radar{
+  position:relative; width:34px; height:34px; border-radius:50%;
+  border:2px solid var(--lime-dim); flex-shrink:0; overflow:hidden; background:#0A0E17;
+}
+.radar::before{
+  content:''; position:absolute; inset:0; border-radius:50%;
+  background:conic-gradient(from 0deg, rgba(228,243,0,.55), transparent 30%);
+  animation:sweep 2.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce){ .radar::before{ animation:none; } }
+@keyframes sweep{ to{ transform:rotate(360deg); } }
+.radar::after{ content:''; position:absolute; inset:9px; border-radius:50%; background:var(--bg); }
+.brand{flex:1; min-width:0;}
+.brand b{display:block; font-size:1.18rem; letter-spacing:.02em;}
+.brand span{font-size:.72rem; color:var(--ink-soft); letter-spacing:.04em; text-transform:uppercase;}
+.counter{
+  text-align:right; flex-shrink:0;
+}
+.counter b{font-family:'Rajdhani',sans-serif; font-size:1.5rem; color:var(--lime); display:block; line-height:1;}
+.counter span{font-size:.66rem; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.05em;}
+
+/* ============ FILTROS ============ */
+.filters{padding:16px 0 4px; position:sticky; top:0; background:var(--bg); z-index:20;}
+.search{
+  display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line);
+  border-radius:var(--r-sm); padding:11px 14px; margin-bottom:10px;
+}
+.search input{
+  flex:1; background:none; border:none; color:var(--ink); font-size:.92rem; outline:none;
+}
+.search input::placeholder{color:var(--ink-faint);}
+.chip-row{display:flex; gap:7px; overflow-x:auto; padding-bottom:8px; scrollbar-width:none;}
+.chip-row::-webkit-scrollbar{display:none;}
+.chip{
+  flex-shrink:0; padding:7px 13px; border-radius:999px; border:1px solid var(--line); background:var(--panel);
+  color:var(--ink-soft); font-size:.78rem; font-weight:600; cursor:pointer; white-space:nowrap;
+  -webkit-tap-highlight-color:transparent; transition:.15s;
+}
+.chip.on{background:var(--lime); border-color:var(--lime); color:#07090F;}
+
+/* ============ FEED / CARDS ============ */
+.feed{display:flex; flex-direction:column; gap:12px; margin-top:14px;}
+.card{
+  display:flex; gap:0; background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+  overflow:hidden;
+}
+/* Barra de señal — el elemento distintivo: intensidad = score */
+.signal{
+  width:6px; flex-shrink:0; background:var(--grey-sig); position:relative;
+}
+.signal[data-tier="alta"]{background:linear-gradient(var(--lime), var(--lime-dim));}
+.signal[data-tier="media"]{background:linear-gradient(var(--teal), #1E7268);}
+.signal[data-tier="baja"]{background:linear-gradient(var(--amber), #7A5416);}
+.card-body{flex:1; min-width:0; padding:16px;}
+.card-top{display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:8px;}
+.score-badge{
+  font-family:'Rajdhani',sans-serif; font-size:1.35rem; font-weight:700; line-height:1;
+  flex-shrink:0; min-width:44px; text-align:right;
+}
+.score-badge[data-tier="alta"]{color:var(--lime);}
+.score-badge[data-tier="media"]{color:var(--teal);}
+.score-badge[data-tier="baja"]{color:var(--amber);}
+.prioridad-tx{font-size:.62rem; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.05em; text-align:right; display:block;}
+.titulo{font-size:.98rem; font-weight:700; line-height:1.35; margin:0 0 6px;}
+.meta{font-size:.8rem; color:var(--ink-soft); margin:0 0 4px; display:flex; gap:6px; align-items:baseline;}
+.meta b{color:var(--ink);}
+.tags{display:flex; gap:6px; flex-wrap:wrap; margin:10px 0;}
+.tag{
+  font-size:.68rem; padding:3px 9px; border-radius:6px; background:var(--panel-2); color:var(--ink-soft);
+  border:1px solid var(--line);
+}
+.tag.cpv{font-family:var(--mono);}
+.foot-row{display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap;}
+.budget{font-family:var(--mono); font-size:.92rem; font-weight:600; color:var(--lime);}
+.deadline{font-size:.76rem; color:var(--ink-faint);}
+.deadline.urgent{color:var(--amber); font-weight:600;}
+.linkbtn{
+  font-size:.78rem; font-weight:600; color:var(--ink); text-decoration:none; padding:8px 13px;
+  border:1px solid var(--line); border-radius:var(--r-sm); white-space:nowrap;
+}
+.linkbtn:hover{border-color:var(--lime); color:var(--lime);}
+
+/* ============ ESTADOS ============ */
+.empty, .loading{
+  text-align:center; padding:60px 20px; color:var(--ink-faint); font-size:.9rem;
+}
+.empty b, .loading b{display:block; color:var(--ink-soft); font-size:1rem; margin-bottom:6px; font-family:'Rajdhani',sans-serif;}
+
+.disclaimer{font-size:.7rem; color:var(--ink-faint); text-align:center; margin-top:30px; line-height:1.5;}
+.disclaimer a{color:var(--ink-soft);}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="radar"></div>
+  <div class="brand">
+    <b>LicitaTech AI</b>
+    <span>Radar de contratación pública</span>
+  </div>
+  <div class="counter">
+    <b id="count-total">—</b>
+    <span>detectadas</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="filters">
+    <div class="search">
+      <span>🔎</span>
+      <input id="search-input" type="text" placeholder="Buscar por objeto, organismo…">
+    </div>
+    <div class="chip-row" id="categoria-chips">
+      <button class="chip on" data-cat="todas">Todas</button>
+      <!-- se rellenan dinámicamente según categorías presentes -->
+    </div>
+    <div class="chip-row" id="estado-chips">
+      <button class="chip on" data-estado="abiertas">🟢 Abiertas</button>
+      <button class="chip" data-estado="todas">Todas</button>
+      <button class="chip" data-score="70">Score ≥ 70</button>
+    </div>
+  </div>
+
+  <div id="feed" class="feed">
+    <div class="loading"><b>Escaneando…</b>Conectando con la base de licitaciones.</div>
+  </div>
+
+  <p class="disclaimer">
+    Datos públicos sincronizados automáticamente desde la Plataforma de Contratación del Sector Público (PLACSP).
+    LicitaTech AI no participa en ningún proceso de contratación — para trámites oficiales usa siempre el
+    <a href="https://contrataciondelestado.es/wps/portal/plataforma" target="_blank" rel="noopener">enlace al expediente</a>.
+  </p>
+</div>
+
+<script>
+// ============ CONFIG — rellenar con tu proyecto Supabase ============
+const SUPABASE_URL = 'https://TU_PROYECTO.supabase.co';
+const SUPABASE_ANON_KEY = 'TU_ANON_KEY'; // clave pública "anon" (no la service_role)
+
+const { createClient } = supabase;
+const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const ESTADOS_ABIERTOS = ['PUB', 'EV'];
+const $ = id => document.getElementById(id);
+
+let allLicitaciones = [];
+let filtroCategoria = 'todas';
+let filtroEstado = 'abiertas';
+let filtroScoreMin = 0;
+let filtroTexto = '';
+
+function tier(score){
+  if(score >= 70) return 'alta';
+  if(score >= 40) return 'media';
+  return 'baja';
+}
+
+function diasRestantes(fechaLimite){
+  if(!fechaLimite) return null;
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+  const limite = new Date(fechaLimite + 'T00:00:00');
+  return Math.round((limite - hoy) / 86400000);
+}
+
+function formatoDinero(n){
+  if(!n) return null;
+  return new Intl.NumberFormat('es-ES', { style:'currency', currency:'EUR', maximumFractionDigits:0 }).format(n);
+}
+
+function renderChipsCategorias(){
+  const categorias = new Set();
+  allLicitaciones.forEach(l => (l.categorias || []).forEach(c => categorias.add(c)));
+  const row = $('categoria-chips');
+  [...categorias].sort().forEach(cat => {
+    const btn = document.createElement('button');
+    btn.className = 'chip'; btn.dataset.cat = cat; btn.textContent = cat;
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#categoria-chips .chip').forEach(c => c.classList.remove('on'));
+      btn.classList.add('on'); filtroCategoria = cat; render();
+    });
+    row.appendChild(btn);
+  });
+}
+
+function renderFeed(){
+  const feed = $('feed');
+  let items = allLicitaciones.filter(l => {
+    if(filtroCategoria !== 'todas' && !(l.categorias || []).includes(filtroCategoria)) return false;
+    if(filtroEstado === 'abiertas' && !ESTADOS_ABIERTOS.includes(l.estado)) return false;
+    if((l.score || 0) < filtroScoreMin) return false;
+    if(filtroTexto){
+      const t = (l.titulo + ' ' + l.objeto + ' ' + l.organismo).toLowerCase();
+      if(!t.includes(filtroTexto.toLowerCase())) return false;
+    }
+    return true;
+  });
+
+  $('count-total').textContent = allLicitaciones.length;
+
+  if(!items.length){
+    feed.innerHTML = `<div class="empty"><b>Sin señal</b>No hay licitaciones que encajen con estos filtros ahora mismo.</div>`;
+    return;
+  }
+
+  feed.innerHTML = items.map(l => {
+    const t = tier(l.score || 0);
+    const dias = diasRestantes(l.fecha_limite);
+    const presupuesto = formatoDinero(l.presupuesto || l.valor_estimado);
+    const cpvTags = (l.cpv || []).slice(0, 3).map(c => `<span class="tag cpv">${c}</span>`).join('');
+    const catTags = (l.categorias || []).map(c => `<span class="tag">${c}</span>`).join('');
+
+    return `<div class="card">
+      <div class="signal" data-tier="${t}"></div>
+      <div class="card-body">
+        <div class="card-top">
+          <p class="titulo">${l.titulo || l.objeto || 'Licitación sin título'}</p>
+          <div>
+            <span class="score-badge" data-tier="${t}">${l.score ?? '–'}</span>
+            <span class="prioridad-tx">${l.prioridad || ''}</span>
+          </div>
+        </div>
+        <p class="meta">🏛️ <b>${l.organismo || 'Organismo sin especificar'}</b></p>
+        ${l.comunidad_autonoma ? `<p class="meta">📍 ${l.comunidad_autonoma}${l.provincia ? ' · ' + l.provincia : ''}</p>` : ''}
+        <div class="tags">${catTags}${cpvTags}</div>
+        <div class="foot-row">
+          <div>
+            ${presupuesto ? `<span class="budget">${presupuesto}</span>` : ''}
+            ${dias !== null ? `<div class="deadline ${dias <= 15 ? 'urgent' : ''}">${dias >= 0 ? `⏳ ${dias} días para el plazo` : '⚪ Plazo finalizado'}</div>` : ''}
+          </div>
+          ${l.enlace_oficial ? `<a class="linkbtn" href="${l.enlace_oficial}" target="_blank" rel="noopener">Ver expediente ↗</a>` : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function render(){ renderFeed(); }
+
+$('search-input').addEventListener('input', e => { filtroTexto = e.target.value.trim(); render(); });
+
+document.querySelectorAll('#estado-chips .chip').forEach(ch => {
+  ch.addEventListener('click', () => {
+    document.querySelectorAll('#estado-chips .chip').forEach(c => c.classList.remove('on'));
+    ch.classList.add('on');
+    if(ch.dataset.estado) filtroEstado = ch.dataset.estado;
+    if(ch.dataset.score) filtroScoreMin = filtroScoreMin ? 0 : Number(ch.dataset.score); // toggle
+    render();
+  });
+});
+
+async function cargarLicitaciones(){
+  const { data, error } = await db
+    .from('licitaciones')
+    .select('*')
+    .order('score', { ascending: false })
+    .limit(200);
+
+  if(error){
+    $('feed').innerHTML = `<div class="empty"><b>Error de conexión</b>${error.message}</div>`;
+    return;
+  }
+  allLicitaciones = data || [];
+  renderChipsCategorias();
+  render();
+}
+
+cargarLicitaciones();
+// Refresca cada 5 min por si el cron de GitHub Actions ha sincronizado nuevas
+setInterval(cargarLicitaciones, 5 * 60 * 1000);
+</script>
+</body>
+</html>
