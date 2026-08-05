@@ -17,6 +17,13 @@ const EMAIL_TO = (process.env.EMAIL_TO || '').split(',').map(e => e.trim()).filt
 
 const PORTAL_URL = 'https://licitaciones.nltech.es';
 
+// REGLA DE NEGOCIO: solo se puede presentar oferta mientras esta PUBLICADA.
+// En Evaluacion el plazo ya cerro, asi que no tiene sentido alertar de ellas.
+function esPresentable(lic) {
+  const e = (lic?.estado || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return e.startsWith('pub');
+}
+
 function diasRestantes(fecha) {
   if (!fecha) return null;
   const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
@@ -74,7 +81,7 @@ function construirEmailHTML(nuevas, urgentes) {
     <div style="padding:20px 24px 4px;">
       <p style="font-size:13px;color:#666;margin:0 0 4px;text-transform:capitalize;">${fecha}</p>
       <p style="font-size:14px;color:#111;margin:0;">
-        <b>${nuevas.length}</b> licitaciones nuevas detectadas en las últimas 24h
+        <b>${nuevas.length}</b> licitaciones <b>publicadas</b> en las últimas 24h (podéis presentaros)
         ${urgentes.length ? ` · <b style="color:#D9480F;">${urgentes.length} urgentes</b> (&lt;5 días para el plazo)` : ''}
       </p>
     </div>
@@ -86,7 +93,7 @@ function construirEmailHTML(nuevas, urgentes) {
     </div>` : ''}
 
     <div style="padding:16px 24px 0;">
-      <h3 style="font-size:13px;color:#8B9200;text-transform:uppercase;letter-spacing:.03em;margin:0 0 8px;">🆕 Nuevas de hoy</h3>
+      <h3 style="font-size:13px;color:#8B9200;text-transform:uppercase;letter-spacing:.03em;margin:0 0 8px;">🆕 Publicadas hoy</h3>
       ${nuevas.length
         ? `<table style="width:100%;border-collapse:collapse;">${nuevas.map(filaHTML).join('')}</table>`
         : `<p style="font-size:13px;color:#888;">Sin licitaciones nuevas en las últimas 24h.</p>`}
@@ -136,29 +143,32 @@ async function main() {
 
   const hace24h = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
 
-  const { data: nuevas, error } = await supabase
+  const { data: crudas, error } = await supabase
     .from('licitaciones')
     .select('*')
     .gte('created_at', hace24h)
     .order('score', { ascending: false })
-    .limit(50);
+    .limit(200);
 
   if (error) throw error;
+
+  // Solo las que estan PUBLICADAS: si ya esta en evaluacion, no podemos presentarnos
+  const nuevas = (crudas || []).filter(esPresentable).slice(0, 50);
 
   const urgentes = (nuevas || []).filter(l => {
     const dias = diasRestantes(l.fecha_limite);
     return dias !== null && dias >= 0 && dias < 5;
   });
 
-  console.log(`   ${nuevas?.length || 0} nuevas, ${urgentes.length} urgentes`);
+  console.log(`   ${crudas?.length || 0} detectadas · ${nuevas.length} publicadas (presentables) · ${urgentes.length} urgentes`);
 
-  if (!nuevas || nuevas.length === 0) {
-    console.log('ℹ️ Sin licitaciones nuevas — no se envía email (evita ruido innecesario).');
+  if (nuevas.length === 0) {
+    console.log('ℹ️ Sin licitaciones nuevas PUBLICADAS — no se envía email (evita ruido innecesario).');
     return;
   }
 
   const html = construirEmailHTML(nuevas, urgentes);
-  const resumen = `${nuevas.length} nuevas${urgentes.length ? `, ${urgentes.length} urgentes` : ''}`;
+  const resumen = `${nuevas.length} publicadas${urgentes.length ? `, ${urgentes.length} urgentes` : ''}`;
   await enviarEmail(html, resumen);
 
   console.log('✅ Email enviado correctamente');
