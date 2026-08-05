@@ -2,14 +2,15 @@ name: Sync licitaciones PLACSP
 
 on:
   schedule:
-    # Cada 12h: 06:00 y 18:00 UTC (ajustar si quieres otro horario)
     - cron: '0 6,18 * * *'
-  workflow_dispatch: {} # permite ejecutarlo manualmente desde la pestaña Actions
+  workflow_dispatch: {}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # El script tiene su propio presupuesto interno de 22 min y guarda el cursor
+    # tras cada página, así que este timeout es solo una red de seguridad.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,11 +18,10 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '22'
 
       - name: Instalar dependencias
-        run: npm ci
+        run: npm install
 
       - name: Ejecutar sincronización
         env:
