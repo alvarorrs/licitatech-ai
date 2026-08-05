@@ -1,0 +1,33 @@
+name: Resumen diario por email
+
+on:
+  schedule:
+    # 22:00 UTC = 23:00 o 00:00 hora España según horario de verano/invierno.
+    # Se ejecuta DESPUÉS del último sync del día (que corre a las 18:00 UTC).
+    - cron: '0 22 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  enviar-resumen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Enviar resumen diario
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: node send-daily-email.mjs
