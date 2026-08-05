@@ -19,7 +19,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-- name: Instalar dependencias
+      - name: Instalar dependencias
         run: npm install
 
       - name: Ejecutar sincronización
