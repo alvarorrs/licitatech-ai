@@ -40,7 +40,7 @@ import { calcularScore } from './rule-scoring.mjs';
 const ANIO = process.env.BACKFILL_ANIO;   // ej. '2024'
 const MES = process.env.BACKFILL_MES;     // ej. '03' (opcional — si falta, se usa el ZIP anual)
 const CANAL_ID = 'placsp_perfiles_contratante';
-const LOTE_UPSERT = 500;
+const LOTE_UPSERT = 200; // más pequeño que en la ingesta diaria: los ficheros base del backfill pueden ser mucho más grandes
 const PRESUPUESTO_MS = 22 * 60 * 1000;
 const INICIO = Date.now();
 const tiempoAgotado = () => (Date.now() - INICIO) > PRESUPUESTO_MS;
@@ -113,6 +113,18 @@ async function cargarBibliotecas() {
   return { cpv: cpv ?? [], keywords: keywords ?? [] };
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function upsertConReintento(chunk, intentos = 2) {
+  for (let i = 1; i <= intentos; i++) {
+    const { error } = await supabase.from('licitaciones').upsert(chunk, { onConflict: 'id_expediente' });
+    if (!error) return;
+    if (i === intentos) throw error;
+    console.warn(`   ⚠️ Fallo de red guardando lote (intento ${i}/${intentos}): ${error.message}. Reintentando...`);
+    await sleep(2000 * i);
+  }
+}
+
 async function procesarLote(licitaciones, cpvBiblioteca, keywordsBiblioteca) {
   if (!licitaciones.length) return { nuevas: 0, actualizadas: 0 };
   const ids = licitaciones.map(l => l.id_expediente);
@@ -130,22 +142,35 @@ async function procesarLote(licitaciones, cpvBiblioteca, keywordsBiblioteca) {
     return { ...lic, ...score, historico, updated_at: new Date().toISOString() };
   });
 
+  // Lotes más pequeños que en la ingesta diaria (200 en vez de 500): los
+  // ficheros "base" del backfill pueden traer muchas más entradas de golpe
+  // que un día suelto, y payloads más pequeños reducen el riesgo de que
+  // una petición falle por tamaño/timeout.
+  let procesadas = 0, fallidas = 0;
   for (let i = 0; i < filas.length; i += LOTE_UPSERT) {
     const chunk = filas.slice(i, i + LOTE_UPSERT);
-    const { error } = await supabase.from('licitaciones').upsert(chunk, { onConflict: 'id_expediente' });
-    if (error) throw error;
+    try {
+      await upsertConReintento(chunk);
+      procesadas += chunk.length;
+    } catch (e) {
+      console.error(`      ❌ Lote ${i}-${i + chunk.length} descartado tras reintentos: ${e.message}`);
+      fallidas += chunk.length;
+    }
   }
 
   const nuevas = licitaciones.filter(l => !mapaExistentes.has(l.id_expediente)).length;
-  return { nuevas, actualizadas: licitaciones.length - nuevas };
+  return { nuevas, actualizadas: licitaciones.length - nuevas, fallidas };
 }
 
-/** Sigue la cadena rel="next" dentro del directorio descomprimido. */
+/** Sigue la cadena rel="next" dentro del directorio descomprimido.
+ * IMPORTANTE: devuelve solo el NOMBRE del fichero (no la ruta completa) —
+ * el bucle principal siempre hace join(dirTmp, archivoActual), así que
+ * devolver aquí una ruta ya combinada la duplicaba (bug real detectado
+ * en producción: ".../NSUdW6/tmp/placsp-backfill-NSUdW6/..."). */
 function siguienteArchivoLocal(root, hrefNext) {
   if (!hrefNext) return null;
   const nombre = hrefNext.split('/').pop();
-  const encontrado = readdirSync(root).find(f => f === nombre);
-  return encontrado ? join(root, encontrado) : null;
+  return readdirSync(root).find(f => f === nombre) || null;
 }
 
 async function main() {
@@ -177,48 +202,55 @@ async function main() {
   // sufijo _2, _3... si existe; si no, el primero por orden alfabético).
   let archivoActual = archivosAtom.find(f => !/_\d+\.atom$/.test(f)) || archivosAtom[0];
   const visitados = new Set();
-  let nuevas = 0, actualizadas = 0, errores = 0, ficheros = 0;
+  let nuevas = 0, actualizadas = 0, fallidas = 0, errores = 0, ficheros = 0;
 
   while (archivoActual && !visitados.has(archivoActual)) {
     if (tiempoAgotado()) { console.log('⏱️ Presupuesto de tiempo agotado en este periodo — relanza el mismo mes para continuar (los ya guardados no se duplican).'); break; }
     visitados.add(archivoActual);
 
+    // Se calcula SIEMPRE el siguiente fichero antes de procesar el actual,
+    // así un fichero corrupto o un error de red no corta la cadena del
+    // resto del mes — solo se salta ese fichero concreto y sigue.
+    let root = null;
+    let siguienteHref = null;
+
     const ruta = join(dirTmp, archivoActual);
-    let feed;
     try {
-      feed = xmlParser.parse(readFileSync(ruta, 'utf-8'));
+      const contenido = readFileSync(ruta, 'utf-8');
+      const feed = xmlParser.parse(contenido);
+      root = feed?.feed ?? feed;
+      const links = Array.isArray(root?.link) ? root.link : [root?.link].filter(Boolean);
+      siguienteHref = links.find(l => l?.['@_rel'] === 'next')?.['@_href'];
     } catch (e) {
-      console.error(`   ❌ Error parseando ${archivoActual}:`, e.message);
+      console.error(`   ❌ Error leyendo/parseando ${archivoActual}: ${e.message} — se salta y continúa con el siguiente`);
       errores++;
-      break;
     }
 
-    const root = feed?.feed ?? feed;
-    const entries = Array.isArray(root?.entry) ? root.entry : [root?.entry].filter(Boolean);
-    const licitaciones = entries.filter(e => !e?.['deleted-entry']).map(normalizarEntry);
+    if (root) {
+      const entries = Array.isArray(root?.entry) ? root.entry : [root?.entry].filter(Boolean);
+      const licitaciones = entries.filter(e => !e?.['deleted-entry']).map(normalizarEntry);
 
-    try {
-      const r = await procesarLote(licitaciones, cpvBiblioteca, keywordsBiblioteca);
-      nuevas += r.nuevas; actualizadas += r.actualizadas;
-    } catch (e) {
-      console.error(`   ❌ Error guardando lote de ${archivoActual}:`, e.message);
-      errores++;
+      try {
+        const r = await procesarLote(licitaciones, cpvBiblioteca, keywordsBiblioteca);
+        nuevas += r.nuevas; actualizadas += r.actualizadas; fallidas += r.fallidas || 0;
+      } catch (e) {
+        console.error(`   ❌ Error guardando lote de ${archivoActual}: ${e.message} — se salta y continúa`);
+        errores++;
+      }
     }
 
     ficheros++;
-    if (ficheros % 5 === 0) console.log(`   ✓ ${ficheros}/${archivosAtom.length} ficheros · ${nuevas + actualizadas} procesadas`);
+    if (ficheros % 10 === 0) console.log(`   ✓ ${ficheros}/${archivosAtom.length} ficheros · ${nuevas + actualizadas} procesadas`);
 
     // Sigue el enlace rel="next" si existe; si no, cae al siguiente por orden alfabético
-    const links = Array.isArray(root?.link) ? root.link : [root?.link].filter(Boolean);
-    const hrefNext = links.find(l => l?.['@_rel'] === 'next')?.['@_href'];
-    const siguientePorLink = siguienteArchivoLocal(dirTmp, hrefNext);
+    const siguientePorLink = siguienteArchivoLocal(dirTmp, siguienteHref);
     archivoActual = siguientePorLink || archivosAtom.find(f => !visitados.has(f)) || null;
   }
 
   rmSync(dirTmp, { recursive: true, force: true });
 
   console.log(`\n✅ BACKFILL ${ANIO}${MES ? '-' + MES : ''} completado:`);
-  console.log(`   Ficheros procesados: ${ficheros}/${archivosAtom.length} | Nuevas: ${nuevas} | Actualizadas: ${actualizadas} | Errores: ${errores}`);
+  console.log(`   Ficheros procesados: ${ficheros}/${archivosAtom.length} | Nuevas: ${nuevas} | Actualizadas: ${actualizadas} | Fallidas (tras reintento): ${fallidas} | Errores de fichero: ${errores}`);
 }
 
 main().catch(e => { console.error('💥 Error fatal:', e); process.exit(1); });
