@@ -1,0 +1,30 @@
+name: Analizar licitaciones con IA
+
+on:
+  schedule:
+    # 19:00 UTC — despues del sync (18:00) y antes del email (22:00)
+    - cron: '0 19 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  analizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Analizar con Gemini
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: node analizar-ia.mjs
