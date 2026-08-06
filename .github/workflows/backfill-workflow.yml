@@ -1,0 +1,40 @@
+name: Backfill histórico PLACSP
+
+# Se lanza SIEMPRE a mano, un periodo (mes o año) cada vez.
+# Para el año en curso: usa mes (ej. anio=2026, mes=03).
+# Para años anteriores completos: deja mes en blanco (ej. anio=2023).
+on:
+  workflow_dispatch:
+    inputs:
+      anio:
+        description: 'Año (ej. 2024)'
+        required: true
+        type: string
+      mes:
+        description: 'Mes con dos dígitos (ej. 03) — déjalo en blanco para año completo'
+        required: false
+        type: string
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Ejecutar backfill
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BACKFILL_ANIO: ${{ inputs.anio }}
+          BACKFILL_MES: ${{ inputs.mes }}
+        run: node backfill-historico.mjs
