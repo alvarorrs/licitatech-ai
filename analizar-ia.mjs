@@ -1,3 +1,92 @@
+Skip to content
+alvarorrs
+licitatech-ai
+Repository navigation
+Code
+Issues
+Pull requests
+Actions
+Projects
+Wiki
+Security and quality
+Insights
+Settings
+Files
+Go to file
+t
+T
+.github
+README.md
+SUPABASE_SQL_COMPLETO.sql
+analizar-bdns-ia.mjs
+analizar-ia.mjs
+backfill-historico.mjs
+bdns-connector.mjs
+env.example
+index.html
+package.json
+rule-scoring (1).mjs
+rule-scoring.mjs
+schema (1).sql
+schema.sql
+send-daily-email.mjs
+sync-licitaciones.mjs
+sync-licitaciones.yml
+licitatech-ai
+/
+analizar-ia.mjs
+in
+main
+
+Edit
+
+Preview
+Indent mode
+
+Spaces
+Indent size
+
+2
+Line wrap mode
+
+No wrap
+Editing analizar-ia.mjs file contents
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+ 19
+ 20
+ 21
+ 22
+ 23
+ 24
+ 25
+ 26
+ 27
+ 28
+ 29
+ 30
+ 31
+ 32
+ 33
+ 34
+ 35
+ 36
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
@@ -34,99 +123,4 @@ async function obtenerPendientes() {
     .slice(0, MAX_ANALISIS);
 }
 
-async function analizarConGemini(subvencion) {
-  const prompt = `
-Eres un experto en subvenciones españolas. Analiza esta convocatoria y responde SOLO con JSON válido (sin markdown, sin \`\`\`json):
-
-TÍTULO: ${subvencion.titulo}
-ENTIDAD: ${subvencion.entidad_responsable}
-TERRITORIO: ${subvencion.territorio}
-DESCRIPCIÓN: ${subvencion.descripcion || 'No disponible'}
-
-Responde con este formato exacto:
-{
-  "resumen_ejecutivo": "resumen de 2-3 frases explicando de qué trata esta subvención y quién podría beneficiarse, en lenguaje claro",
-  "encaja_sectores": ["sector1", "sector2"],
-  "puntuacion_ia": 50
-}
-
-Para puntuacion_ia usa un número del 0 al 100 según lo interesante/relevante que parece la ayuda basándote solo en el título y entidad (100 = muy relevante y clara, 50 = neutro/poca info, 0 = irrelevante).
-Si no hay suficiente información, sé honesto en el resumen sobre esa limitación.
-`;
-
-  try {
-    const result = await model.generateContent(prompt);
-    const texto = result.response.text();
-    const jsonMatch = texto.match(/\{[\s\S]*\}/);
-    
-    if (!jsonMatch) {
-      console.warn(`⚠️ Sin JSON válido para: ${subvencion.titulo.substring(0, 50)}`);
-      return null;
-    }
-
-    const analisis = JSON.parse(jsonMatch[0]);
-    
-    return {
-      subvencion_id: subvencion.id,
-      resumen_ejecutivo: analisis.resumen_ejecutivo || 'No se pudo generar resumen',
-      encaja_sectores: analisis.encaja_sectores || [],
-      puntuacion_ia: Math.min(100, Math.max(0, parseInt(analisis.puntuacion_ia) || 50)),
-      analizado_en: new Date().toISOString(),
-      modelo_ia: 'gemini-2.0-flash',
-      version_ia: 1
-    };
-  } catch (error) {
-    console.error(`❌ Error Gemini para "${subvencion.titulo.substring(0, 50)}":`, error.message);
-    return null;
-  }
-}
-
-async function main() {
-  console.log('🤖 Iniciando análisis IA real con Gemini...');
-
-  const pendientes = await obtenerPendientes();
-  
-  if (pendientes.length === 0) {
-    console.log('✅ No hay subvenciones pendientes de analizar.');
-    process.exit(0);
-  }
-
-  console.log(`📋 Analizando ${pendientes.length} subvenciones...`);
-
-  let exitosas = 0;
-
-  for (let i = 0; i < pendientes.length; i++) {
-    const sub = pendientes[i];
-    console.log(`[${i + 1}/${pendientes.length}] ${sub.titulo.substring(0, 60)}...`);
-
-    const analisis = await analizarConGemini(sub);
-
-    if (analisis) {
-      const { error } = await supabase
-        .schema('arena')
-        .from('subvenciones_ia')
-        .upsert(analisis, { onConflict: 'subvencion_id' });
-
-      if (error) {
-        console.error('❌ Error guardando:', error.message);
-      } else {
-        exitosas++;
-        console.log(`   ✅ Puntuación: ${analisis.puntuacion_ia}`);
-      }
-    }
-
-    if (i < pendientes.length - 1) {
-      await new Promise(r => setTimeout(r, PAUSA_MS));
-    }
-  }
-
-  console.log('═'.repeat(50));
-  console.log(`📊 Analizadas con éxito: ${exitosas}/${pendientes.length}`);
-  console.log('═'.repeat(50));
-  process.exit(0);
-}
-
-main().catch(error => {
-  console.error('❌ Error fatal:', error);
-  process.exit(1);
-});
+Use Control + Shift + m to toggle the tab key moving focus. Alternatively, use esc then tab to move to the next interactive element on the page.
