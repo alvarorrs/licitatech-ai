@@ -10,8 +10,8 @@ const supabase = createClient(
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
 
-const MAX_ANALISIS = 15; // Reducido: cuota gratuita más ajustada desde dic 2025
-const PAUSA_MS = 6000;    // Pausa mayor entre llamadas (límite ~10-15 RPM en free tier)
+const MAX_ANALISIS = 15;
+const PAUSA_MS = 6000;
 
 async function obtenerPendientes() {
   const { data, error } = await supabase
@@ -22,7 +22,6 @@ async function obtenerPendientes() {
 
   if (error) throw error;
 
-  // Filtrar las que YA tienen análisis (evitar reanalizar)
   const { data: yaAnalizadas } = await supabase
     .schema('arena')
     .from('subvenciones_ia')
@@ -48,10 +47,12 @@ Responde con este formato exacto:
 {
   "resumen_ejecutivo": "resumen de 2-3 frases explicando de qué trata esta subvención y quién podría beneficiarse, en lenguaje claro",
   "encaja_sectores": ["sector1", "sector2"],
-  "puntuacion_ia": 50
+  "puntuacion_ia": 50,
+  "fecha_cierre_detectada": "2026-12-31 o null si no se menciona ninguna fecha o plazo concreto en el texto"
 }
 
 Para puntuacion_ia usa un número del 0 al 100 según lo interesante/relevante que parece la ayuda basándote solo en el título y entidad (100 = muy relevante y clara, 50 = neutro/poca info, 0 = irrelevante).
+Para fecha_cierre_detectada: solo rellena si el título o descripción mencionan EXPLÍCITAMENTE una fecha límite o plazo concreto (formato YYYY-MM-DD). Si no aparece ninguna fecha o plazo, pon null. No inventes ni calcules fechas relativas tipo "15 días desde publicación" si no puedes resolver la fecha exacta.
 Si no hay suficiente información, sé honesto en el resumen sobre esa limitación.
 `;
 
@@ -66,6 +67,14 @@ Si no hay suficiente información, sé honesto en el resumen sobre esa limitaci�
     }
 
     const analisis = JSON.parse(jsonMatch[0]);
+
+    let fechaCierreDetectada = null;
+    if (analisis.fecha_cierre_detectada && analisis.fecha_cierre_detectada !== 'null') {
+      const fechaParseada = new Date(analisis.fecha_cierre_detectada);
+      if (!isNaN(fechaParseada.getTime()) && fechaParseada > new Date()) {
+        fechaCierreDetectada = fechaParseada.toISOString();
+      }
+    }
     
     return {
       subvencion_id: subvencion.id,
@@ -74,7 +83,8 @@ Si no hay suficiente información, sé honesto en el resumen sobre esa limitaci�
       puntuacion_ia: Math.min(100, Math.max(0, parseInt(analisis.puntuacion_ia) || 50)),
       analizado_en: new Date().toISOString(),
       modelo_ia: 'gemini-flash-latest',
-      version_ia: 1
+      version_ia: 1,
+      fecha_cierre_detectada: fechaCierreDetectada
     };
   } catch (error) {
     console.error(`❌ Error Gemini para "${subvencion.titulo.substring(0, 50)}":`, error.message);
@@ -103,6 +113,9 @@ async function main() {
     const analisis = await analizarConGemini(sub);
 
     if (analisis) {
+      const fechaDetectada = analisis.fecha_cierre_detectada;
+      delete analisis.fecha_cierre_detectada;
+
       const { error } = await supabase
         .schema('arena')
         .from('subvenciones_ia')
@@ -113,6 +126,18 @@ async function main() {
       } else {
         exitosas++;
         console.log(`   ✅ Puntuación: ${analisis.puntuacion_ia}`);
+
+        if (fechaDetectada) {
+          const { error: errorFecha } = await supabase
+            .schema('arena')
+            .from('subvenciones')
+            .update({ fecha_cierre: fechaDetectada })
+            .eq('id', sub.id);
+
+          if (!errorFecha) {
+            console.log(`   📅 Fecha de cierre real detectada: ${fechaDetectada.substring(0, 10)}`);
+          }
+        }
       }
     }
 
