@@ -7,7 +7,7 @@ const supabase = createClient(
 );
 
 const BOE_BASE = 'https://www.boe.es/datosabiertos/api/boe/sumario';
-const DIAS_ATRAS = 7;
+const DIAS_ATRAS = 7; // Cuántos días hacia atrás revisar cada ejecución
 
 function formatearFechaBOE(fecha) {
   const y = fecha.getFullYear();
@@ -33,6 +33,7 @@ async function fetchSumarioDia(fechaStr) {
     });
 
     if (!response.ok) {
+      // Días sin BOE (festivos) devuelven error, es normal
       return null;
     }
 
@@ -47,13 +48,17 @@ function extraerAnunciosSubvenciones(sumarioData, fechaStr) {
   const anuncios = [];
   
   try {
-    const diarios = sumarioData?.data?.sumario?.diario || [];
+    const diariosRaw = sumarioData?.data?.sumario?.diario || [];
+    const diarios = Array.isArray(diariosRaw) ? diariosRaw : [diariosRaw];
     
     for (const diario of diarios) {
-      const secciones = diario.seccion || [];
+      const seccionesRaw = diario.seccion || [];
+      const secciones = Array.isArray(seccionesRaw) ? seccionesRaw : [seccionesRaw];
       
       for (const seccion of secciones) {
-        const departamentos = seccion.departamento || [];
+        // Nos interesa sección V (Anuncios) principalmente, pero revisamos todas
+        const departamentosRaw = seccion.departamento || [];
+        const departamentos = Array.isArray(departamentosRaw) ? departamentosRaw : [departamentosRaw];
         
         for (const depto of departamentos) {
           const epigrafes = depto.epigrafe || [];
@@ -150,6 +155,7 @@ async function sync() {
       console.log(`   📭 Sin anuncios de subvenciones`);
     }
 
+    // Pausa pequeña entre días para no saturar la API del BOE
     await new Promise(r => setTimeout(r, 500));
   }
 
