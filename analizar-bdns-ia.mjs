@@ -10,7 +10,8 @@ async function analizarIA() {
   console.log('🤖 Iniciando análisis IA...');
   try {
     const { data: subs, error: errorSub } = await supabase
-      .from('arena.subvenciones')
+      .schema('arena')
+      .from('subvenciones')
       .select('id')
       .is('embedding', null)
       .limit(5);
@@ -23,7 +24,8 @@ async function analizarIA() {
 
     for (const sub of subs) {
       await supabase
-        .from('arena.subvenciones_ia')
+        .schema('arena')
+        .from('subvenciones_ia')
         .upsert({
           subvencion_id: sub.id,
           resumen_ejecutivo: 'Resumen de ejemplo',
