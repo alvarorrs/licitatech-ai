@@ -8,10 +8,10 @@ const supabase = createClient(
 );
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 
-const MAX_ANALISIS = 20;
-const PAUSA_MS = 4000;
+const MAX_ANALISIS = 15; // Reducido: cuota gratuita más ajustada desde dic 2025
+const PAUSA_MS = 6000;    // Pausa mayor entre llamadas (límite ~10-15 RPM en free tier)
 
 async function obtenerPendientes() {
   const { data, error } = await supabase
@@ -22,6 +22,7 @@ async function obtenerPendientes() {
 
   if (error) throw error;
 
+  // Filtrar las que YA tienen análisis (evitar reanalizar)
   const { data: yaAnalizadas } = await supabase
     .schema('arena')
     .from('subvenciones_ia')
@@ -72,7 +73,7 @@ Si no hay suficiente información, sé honesto en el resumen sobre esa limitaci�
       encaja_sectores: analisis.encaja_sectores || [],
       puntuacion_ia: Math.min(100, Math.max(0, parseInt(analisis.puntuacion_ia) || 50)),
       analizado_en: new Date().toISOString(),
-      modelo_ia: 'gemini-2.0-flash',
+      modelo_ia: 'gemini-2.5-flash-lite',
       version_ia: 1
     };
   } catch (error) {
