@@ -8,7 +8,7 @@ const supabase = createClient(
 );
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
+const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
 
 const MAX_ANALISIS = 15; // Reducido: cuota gratuita más ajustada desde dic 2025
 const PAUSA_MS = 6000;    // Pausa mayor entre llamadas (límite ~10-15 RPM en free tier)
@@ -73,7 +73,7 @@ Si no hay suficiente información, sé honesto en el resumen sobre esa limitaci�
       encaja_sectores: analisis.encaja_sectores || [],
       puntuacion_ia: Math.min(100, Math.max(0, parseInt(analisis.puntuacion_ia) || 50)),
       analizado_en: new Date().toISOString(),
-      modelo_ia: 'gemini-2.5-flash-lite',
+      modelo_ia: 'gemini-flash-latest',
       version_ia: 1
     };
   } catch (error) {
