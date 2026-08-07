@@ -1,11 +1,8 @@
 name: ARENA - Sync BDNS Subvenciones
 
 on:
-  # Ejecutar cada 6 horas
   schedule:
-    - cron: '0 */6 * * *'  # 00:00, 06:00, 12:00, 18:00 UTC
-  
-  # Permitir ejecución manual
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       limpiar_cursor:
@@ -16,7 +13,7 @@ on:
 jobs:
   sync-bdns:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # Red de seguridad, el script para a los 22min
+    timeout-minutes: 45
     
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -27,65 +24,19 @@ jobs:
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            scripts/conectores
-            package.json
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
       
       - name: Instalar dependencias
-        run: npm ci --only=production
-      
-      - name: Resetear cursor (si aplica)
-        if: github.event.inputs.limpiar_cursor == 'true'
-        run: |
-          echo "🔄 Limpiando cursor de sincronización..."
-          # Esto se ejecutaría dentro de un script SQL, pero lo dejamos en el script Node.js
+        run: npm install
       
       - name: Ejecutar sincronización BDNS
-        run: node scripts/conectores/bdns-connector.mjs
-        continue-on-error: true  # No fallar el workflow si hay error, registrarlo
-      
-      - name: Subir logs a artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-logs-bdns-${{ github.run_id }}
-          path: logs/
-          retention-days: 7
-      
-      - name: Notificar éxito (Discord)
-        if: success()
-        uses: sarisia/actions-status-discord@v1
-        with:
-          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}
-          status: success
-          title: '✅ ARENA - BDNS Sync Completado'
-          description: |
-            Sincronización de BDNS exitosa
-            Ejecutor: GitHub Actions
-            Horario: ${{ job.status }}
-          color: 0x00ff00
-      
-      - name: Notificar error (Discord)
-        if: failure()
-        uses: sarisia/actions-status-discord@v1
-        with:
-          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}
-          status: failure
-          title: '❌ ARENA - BDNS Sync Falló'
-          description: |
-            Error en sincronización BDNS
-            Revisar logs en artifacts
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          color: 0xff0000
-
-  # Job paralelo: Análisis IA (ejecuta 2-3 horas después)
+        run: node bdns-connector.mjs
+        continue-on-error: true
+  
   analizar-ia-bdns:
     needs: sync-bdns
     runs-on: ubuntu-latest
@@ -101,33 +52,19 @@ jobs:
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            scripts/ia
-            package.json
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
       
       - name: Instalar dependencias
-        run: npm ci --only=production
+        run: npm install
       
       - name: Ejecutar análisis IA (Gemini)
-        run: node scripts/ia/analizar-bdns-ia.mjs
+        run: node analizar-bdns-ia.mjs
         continue-on-error: true
-      
-      - name: Subir logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-logs-ia-${{ github.run_id }}
-          path: logs/
-          retention-days: 7
-
-  # Job: Enviar alertas por email
+  
   enviar-alertas:
     needs: sync-bdns
     runs-on: ubuntu-latest
@@ -143,37 +80,15 @@ jobs:
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            scripts/email
-            package.json
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
       
       - name: Instalar dependencias
-        run: npm ci --only=production
+        run: npm install
       
       - name: Enviar alertas diarias
-        run: node scripts/email/enviar-alertas-diarias.mjs
+        run: node send-daily-email.mjs
         continue-on-error: true
-
-# ============================================================================
-# SECRETS NECESARIOS EN GitHub
-# ============================================================================
-# SUPABASE_URL=https://ckjyusjdpkcpsgxpwhsy.supabase.co
-# SUPABASE_SERVICE_KEY=<tu-service-role-key>
-# BDNS_API_KEY=<solicitar-a-bdns>
-# GEMINI_API_KEY=<gemini-api-key>
-# RESEND_API_KEY=<resend-email-api>
-# DISCORD_WEBHOOK=<webhook-discord-opcional>
-
-# ============================================================================
-# CÓMO EJECUTAR MANUALMENTE
-# ============================================================================
-# 1. GitHub UI: Actions > "ARENA - Sync BDNS" > Run workflow
-# 2. Con reset: Actions > Run workflow > limpiar_cursor=true
-# 3. CLI: gh workflow run sync-bdns.yml --field limpiar_cursor=true
