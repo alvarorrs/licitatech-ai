@@ -1,0 +1,20 @@
+{
+  "name": "licitatech-ai",
+  "version": "2.0.0",
+  "description": "LicitaTech AI + ARENA Funding AI",
+  "type": "module",
+  "scripts": {
+    "sync": "node sync-licitaciones.mjs",
+    "sync:bdns": "node bdns-connector.mjs",
+    "analyze:ia": "node analizar-bdns-ia.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.47.0",
+    "@google/generative-ai": "^0.12.0",
+    "node-fetch": "^3.3.2",
+    "fast-xml-parser": "^4.5.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
