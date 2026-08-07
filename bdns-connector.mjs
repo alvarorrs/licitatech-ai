@@ -41,7 +41,7 @@ async function sync() {
     ];
 
     const { error } = await supabase
-      .from('arena.subvenciones')
+      .schema('arena').from('subvenciones')
       .upsert(subvenciones, { onConflict: 'fuente,id_externo' });
 
     if (error) {
