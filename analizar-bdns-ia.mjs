@@ -13,8 +13,8 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
 
-const MAX_ANALISIS = 100;
-const PAUSA_MS = 500;
+const MAX_ANALISIS = 100; // DeepSeek soporta 2500 concurrentes — sin restricción real de cuota
+const PAUSA_MS = 500; // Pausa mínima solo para no saturar de golpe, no por límite real
 
 function construirPrompt(subvencion) {
   return `
@@ -70,6 +70,7 @@ async function obtenerPendientes() {
     .slice(0, MAX_ANALISIS);
 }
 
+// ============ PROVEEDOR 1: DEEPSEEK ============
 async function intentarDeepSeek(prompt) {
   const response = await fetch(DEEPSEEK_URL, {
     method: 'POST',
@@ -81,7 +82,8 @@ async function intentarDeepSeek(prompt) {
       model: 'deepseek-v4-flash',
       messages: [{ role: 'user', content: prompt }],
       temperature: 1,
-      max_tokens: 500
+      max_tokens: 1200,
+      response_format: { type: 'json_object' }
     })
   });
 
@@ -93,10 +95,11 @@ async function intentarDeepSeek(prompt) {
   const data = await response.json();
   const texto = data.choices?.[0]?.message?.content || '';
   const json = parsearJSON(texto);
-  if (!json) throw new Error('DeepSeek: respuesta sin JSON válido');
+  if (!json) throw new Error(`DeepSeek: respuesta sin JSON válido (finish_reason: ${data.choices?.[0]?.finish_reason})`);
   return json;
 }
 
+// ============ PROVEEDOR 2: GEMINI (respaldo) ============
 async function intentarGemini(prompt) {
   const result = await geminiModel.generateContent(prompt);
   const texto = result.response.text();
@@ -105,17 +108,20 @@ async function intentarGemini(prompt) {
   return json;
 }
 
+// ============ ANÁLISIS CON FALLBACK AUTOMÁTICO ============
 async function analizarSubvencion(subvencion) {
   const prompt = construirPrompt(subvencion);
   let analisis = null;
   let proveedorUsado = null;
 
+  // 1º intento: DeepSeek
   try {
     analisis = await intentarDeepSeek(prompt);
     proveedorUsado = 'deepseek-v4-flash';
   } catch (errorDeepSeek) {
     console.warn(`   ⚠️ DeepSeek falló (${errorDeepSeek.message}), probando Gemini...`);
 
+    // 2º intento: Gemini como respaldo
     try {
       analisis = await intentarGemini(prompt);
       proveedorUsado = 'gemini-flash-latest';
