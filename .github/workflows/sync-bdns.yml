@@ -65,3 +65,24 @@ jobs:
       - run: npm install
       
       - run: node boe-connector.mjs
+
+alertas-email:
+    needs: [sync-bdns, analizar-ia]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - run: npm install
+      
+      - run: node alertas-diarias.mjs
