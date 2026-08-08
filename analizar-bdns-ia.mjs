@@ -13,8 +13,8 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
 
-const MAX_ANALISIS = 100; // DeepSeek soporta 2500 concurrentes — sin restricción real de cuota
-const PAUSA_MS = 500; // Pausa mínima solo para no saturar de golpe, no por límite real
+const MAX_ANALISIS = 100;
+const PAUSA_MS = 500;
 
 function construirPrompt(subvencion) {
   return `
@@ -70,7 +70,6 @@ async function obtenerPendientes() {
     .slice(0, MAX_ANALISIS);
 }
 
-// ============ PROVEEDOR 1: DEEPSEEK ============
 async function intentarDeepSeek(prompt) {
   const response = await fetch(DEEPSEEK_URL, {
     method: 'POST',
@@ -99,7 +98,6 @@ async function intentarDeepSeek(prompt) {
   return json;
 }
 
-// ============ PROVEEDOR 2: GEMINI (respaldo) ============
 async function intentarGemini(prompt) {
   const result = await geminiModel.generateContent(prompt);
   const texto = result.response.text();
@@ -108,20 +106,17 @@ async function intentarGemini(prompt) {
   return json;
 }
 
-// ============ ANÁLISIS CON FALLBACK AUTOMÁTICO ============
 async function analizarSubvencion(subvencion) {
   const prompt = construirPrompt(subvencion);
   let analisis = null;
   let proveedorUsado = null;
 
-  // 1º intento: DeepSeek
   try {
     analisis = await intentarDeepSeek(prompt);
     proveedorUsado = 'deepseek-v4-flash';
   } catch (errorDeepSeek) {
     console.warn(`   ⚠️ DeepSeek falló (${errorDeepSeek.message}), probando Gemini...`);
 
-    // 2º intento: Gemini como respaldo
     try {
       analisis = await intentarGemini(prompt);
       proveedorUsado = 'gemini-flash-latest';
@@ -194,7 +189,7 @@ async function main() {
           const { error: errorFecha } = await supabase
             .schema('arena')
             .from('subvenciones')
-            .update({ fecha_cierre: fechaDetectada })
+            .update({ fecha_cierre: fechaDetectada, fecha_cierre_confirmada: true })
             .eq('id', sub.id);
 
           if (!errorFecha) {
