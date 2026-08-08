@@ -30,11 +30,14 @@ Responde con este formato exacto:
   "resumen_ejecutivo": "resumen de 2-3 frases explicando de qué trata esta subvención y quién podría beneficiarse, en lenguaje claro",
   "encaja_sectores": ["sector1", "sector2"],
   "puntuacion_ia": 50,
-  "fecha_cierre_detectada": "2026-12-31 o null si no se menciona ninguna fecha o plazo concreto en el texto"
+  "fecha_cierre_detectada": "2026-12-31 o null si no se menciona ninguna fecha o plazo concreto en el texto",
+  "restriccion_geografica": "nombre de la CCAA/provincia/municipio concreto si el título o descripción limitan explícitamente a un territorio, o null si no hay ninguna restricción geográfica mencionada o si aplica a toda España",
+  "restriccion_sector": "descripción breve del sector/CNAE/actividad concreta si el título o descripción limitan explícitamente a un tipo de empresa o actividad (ej: 'solo agricultura', 'solo comercio textil'), o null si no hay restricción sectorial clara o aplica a cualquier sector"
 }
 
 Para puntuacion_ia usa un número del 0 al 100 según lo interesante/relevante que parece la ayuda basándote solo en el título y entidad (100 = muy relevante y clara, 50 = neutro/poca info, 0 = irrelevante).
 Para fecha_cierre_detectada: solo rellena si el título o descripción mencionan EXPLÍCITAMENTE una fecha límite o plazo concreto (formato YYYY-MM-DD). Si no aparece ninguna fecha o plazo, pon null. No inventes ni calcules fechas relativas tipo "15 días desde publicación" si no puedes resolver la fecha exacta.
+Para restriccion_geografica y restriccion_sector: sé estricto, solo pon algo si está explícito en el texto, nunca lo infieras ni lo supongas.
 Si no hay suficiente información, sé honesto en el resumen sobre esa limitación.
 `;
 }
@@ -142,7 +145,9 @@ async function analizarSubvencion(subvencion) {
     analizado_en: new Date().toISOString(),
     modelo_ia: proveedorUsado,
     version_ia: 1,
-    fecha_cierre_detectada: fechaCierreDetectada
+    fecha_cierre_detectada: fechaCierreDetectada,
+    restriccion_geografica: (analisis.restriccion_geografica && analisis.restriccion_geografica !== 'null') ? analisis.restriccion_geografica : null,
+    restriccion_sector: (analisis.restriccion_sector && analisis.restriccion_sector !== 'null') ? analisis.restriccion_sector : null
   };
 }
 
